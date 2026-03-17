@@ -3,7 +3,7 @@ FROM node:20-slim AS builder
 
 WORKDIR /app/client
 COPY client/package*.json ./
-RUN npm ci
+RUN npm install
 COPY client/ ./
 RUN npm run build
 
@@ -13,7 +13,7 @@ FROM node:20-slim
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 
 # Copy built Vue SPA
 COPY --from=builder /app/client/dist ./client/dist
