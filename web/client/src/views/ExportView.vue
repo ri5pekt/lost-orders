@@ -8,6 +8,8 @@ const user = ref(null);
 const orderInput = ref("");
 const afterDate = ref("2024-01-01");
 const loading = ref(false);
+const progress = ref(0);
+const progressMsg = ref("");
 const error = ref("");
 const result = ref(null);
 
@@ -32,28 +34,66 @@ async function runExport() {
   error.value = "";
   result.value = null;
   loading.value = true;
+  progress.value = 0;
+  progressMsg.value = "Starting...";
 
   try {
     const after = afterDate.value.replaceAll("-", "/");
-    const res = await fetch("/api/export", {
+
+    // Start job
+    const startRes = await fetch("/api/export", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ orderIds: orderIds.value, afterDate: after }),
     });
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: "Export failed" }));
+    if (!startRes.ok) {
+      const err = await startRes.json().catch(() => ({ error: "Export failed" }));
       throw new Error(err.error || "Export failed");
     }
 
-    const missingHeader = res.headers.get("X-Missing-Orders") || "";
-    const found = parseInt(res.headers.get("X-Found-Count") || "0");
-    const missing = missingHeader ? missingHeader.split(",").filter(Boolean) : [];
+    const { job_id } = await startRes.json();
 
-    const blob = await res.blob();
-    const downloadUrl = URL.createObjectURL(blob);
+    // Stream progress via SSE
+    await new Promise((resolve, reject) => {
+      const es = new EventSource(`/api/export/progress/${job_id}`);
 
-    result.value = { downloadUrl, found, missing };
+      es.onmessage = (e) => {
+        const event = JSON.parse(e.data);
+
+        if (event.type === "progress") {
+          progress.value = event.percent;
+          progressMsg.value = event.message;
+        } else if (event.type === "done") {
+          progress.value = 100;
+          progressMsg.value = event.message;
+          es.close();
+          resolve({ found: event.found, missing: event.missing, total: event.total });
+        } else if (event.type === "error") {
+          es.close();
+          reject(new Error(event.message));
+        }
+        // heartbeat: ignore
+      };
+
+      es.onerror = () => {
+        es.close();
+        reject(new Error("Connection lost. Please try again."));
+      };
+    }).then(async ({ found, missing, total }) => {
+      // Download the PDF
+      progressMsg.value = "Downloading PDF...";
+      const dlRes = await fetch(`/api/export/download/${job_id}`);
+
+      if (!dlRes.ok) {
+        const err = await dlRes.json().catch(() => ({ error: "Download failed" }));
+        throw new Error(err.error || "Download failed");
+      }
+
+      const blob = await dlRes.blob();
+      const downloadUrl = URL.createObjectURL(blob);
+      result.value = { downloadUrl, found, missing: missing || [], total };
+    });
   } catch (err) {
     error.value = err.message || "Something went wrong. Please try again.";
   } finally {
@@ -128,14 +168,23 @@ const today = new Date().toISOString().slice(0, 10);
             :disabled="loading || orderCount === 0"
             @click="runExport"
           >
-            <template v-if="loading">
+            <span v-if="!loading">Export PDF</span>
+            <span v-else class="btn-loading-text">
               <span class="spinner" />
               Processing {{ orderCount }} order{{ orderCount !== 1 ? "s" : "" }}&hellip;
-            </template>
-            <template v-else>
-              Export PDF
-            </template>
+            </span>
           </button>
+        </div>
+
+        <!-- Progress bar -->
+        <div v-if="loading" class="progress-section">
+          <div class="progress-header">
+            <span class="progress-msg">{{ progressMsg }}</span>
+            <span class="progress-pct">{{ progress }}%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" :style="{ width: progress + '%' }" />
+          </div>
         </div>
 
         <!-- Error -->
@@ -206,27 +255,11 @@ const today = new Date().toISOString().slice(0, 10);
   justify-content: space-between;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand-icon { font-size: 20px; }
+.brand-name { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
 
-.brand-icon {
-  font-size: 20px;
-}
-
-.brand-name {
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.user-menu {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
+.user-menu { display: flex; align-items: center; gap: 12px; }
 
 .avatar {
   width: 30px;
@@ -235,10 +268,7 @@ const today = new Date().toISOString().slice(0, 10);
   border: 2px solid rgba(255, 255, 255, 0.2);
 }
 
-.user-name {
-  font-size: 14px;
-  color: #cbd5e1;
-}
+.user-name { font-size: 14px; color: #cbd5e1; }
 
 .btn-signout {
   background: transparent;
@@ -250,11 +280,7 @@ const today = new Date().toISOString().slice(0, 10);
   cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
 }
-
-.btn-signout:hover {
-  color: #fff;
-  border-color: rgba(255, 255, 255, 0.4);
-}
+.btn-signout:hover { color: #fff; border-color: rgba(255,255,255,0.4); }
 
 /* Main */
 .main {
@@ -268,48 +294,21 @@ const today = new Date().toISOString().slice(0, 10);
 .card {
   background: #fff;
   border-radius: 16px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.07), 0 8px 24px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.07), 0 8px 24px rgba(0,0,0,0.06);
   max-width: 680px;
   width: 100%;
   overflow: hidden;
 }
 
-.card-header {
-  padding: 28px 32px 0;
-}
-
-.card-header h2 {
-  font-size: 20px;
-  font-weight: 700;
-  color: #0f172a;
-  margin-bottom: 8px;
-}
-
-.card-header p {
-  font-size: 14px;
-  color: #64748b;
-  line-height: 1.6;
-}
+.card-header { padding: 28px 32px 0; }
+.card-header h2 { font-size: 20px; font-weight: 700; color: #0f172a; margin-bottom: 8px; }
+.card-header p { font-size: 14px; color: #64748b; line-height: 1.6; }
 
 /* Form */
-.form {
-  padding: 24px 32px 32px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
+.form { padding: 24px 32px 28px; display: flex; flex-direction: column; gap: 20px; }
 
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.field-row {
-  flex-direction: row;
-  align-items: center;
-  gap: 12px;
-}
+.field { display: flex; flex-direction: column; gap: 8px; }
+.field-row { flex-direction: row; align-items: center; gap: 12px; }
 
 .field-label {
   font-size: 13px;
@@ -334,11 +333,7 @@ const today = new Date().toISOString().slice(0, 10);
   color: #64748b;
   transition: background 0.2s, color 0.2s;
 }
-
-.badge.active {
-  background: #dbeafe;
-  color: #1d4ed8;
-}
+.badge.active { background: #dbeafe; color: #1d4ed8; }
 
 .textarea {
   width: 100%;
@@ -346,23 +341,15 @@ const today = new Date().toISOString().slice(0, 10);
   border-radius: 10px;
   padding: 12px 14px;
   font-size: 14px;
-  font-family: "SF Mono", "Fira Code", "Fira Mono", monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
   line-height: 1.6;
   color: #1e293b;
   resize: vertical;
-  transition: border-color 0.15s;
   outline: none;
+  transition: border-color 0.15s;
 }
-
-.textarea:focus {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-}
-
-.textarea:disabled {
-  background: #f8fafc;
-  color: #94a3b8;
-}
+.textarea:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
+.textarea:disabled { background: #f8fafc; color: #94a3b8; }
 
 .date-input {
   border: 1.5px solid #e2e8f0;
@@ -373,11 +360,7 @@ const today = new Date().toISOString().slice(0, 10);
   outline: none;
   transition: border-color 0.15s;
 }
-
-.date-input:focus {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-}
+.date-input:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
 
 .btn-export {
   display: flex;
@@ -394,34 +377,72 @@ const today = new Date().toISOString().slice(0, 10);
   cursor: pointer;
   transition: background 0.15s, transform 0.1s;
 }
+.btn-export:hover:not(:disabled) { background: #1e40af; }
+.btn-export:active:not(:disabled) { transform: scale(0.99); }
+.btn-export:disabled { background: #cbd5e1; cursor: not-allowed; }
 
-.btn-export:hover:not(:disabled) {
-  background: #1e40af;
-}
-
-.btn-export:active:not(:disabled) {
-  transform: scale(0.99);
-}
-
-.btn-export:disabled {
-  background: #cbd5e1;
-  cursor: not-allowed;
-}
+.btn-loading-text { display: flex; align-items: center; gap: 10px; }
 
 /* Spinner */
 .spinner {
   display: inline-block;
   width: 16px;
   height: 16px;
-  border: 2.5px solid rgba(255, 255, 255, 0.4);
+  border: 2.5px solid rgba(255,255,255,0.4);
   border-top-color: #fff;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
   flex-shrink: 0;
 }
+@keyframes spin { to { transform: rotate(360deg); } }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
+/* Progress bar */
+.progress-section {
+  margin: 0 32px 24px;
+  padding: 16px 20px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+}
+
+.progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.progress-msg {
+  font-size: 13px;
+  color: #475569;
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.progress-pct {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1d4ed8;
+  margin-left: 12px;
+  flex-shrink: 0;
+}
+
+.progress-track {
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #1d4ed8);
+  border-radius: 99px;
+  transition: width 0.4s ease;
 }
 
 /* Error */
@@ -438,11 +459,7 @@ const today = new Date().toISOString().slice(0, 10);
   font-size: 14px;
   line-height: 1.5;
 }
-
-.error-box svg {
-  flex-shrink: 0;
-  margin-top: 1px;
-}
+.error-box svg { flex-shrink: 0; margin-top: 1px; }
 
 /* Result */
 .result-box {
@@ -456,28 +473,11 @@ const today = new Date().toISOString().slice(0, 10);
   gap: 16px;
 }
 
-.result-stats {
-  display: flex;
-  gap: 16px;
-}
+.result-stats { display: flex; gap: 16px; }
 
-.stat {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-
-.stat-num {
-  font-size: 26px;
-  font-weight: 800;
-  line-height: 1;
-}
-
-.stat-label {
-  font-size: 13px;
-  font-weight: 500;
-}
-
+.stat { display: flex; align-items: baseline; gap: 6px; }
+.stat-num { font-size: 26px; font-weight: 800; line-height: 1; }
+.stat-label { font-size: 13px; font-weight: 500; }
 .stat-found .stat-num { color: #16a34a; }
 .stat-found .stat-label { color: #15803d; }
 .stat-missing .stat-num { color: #d97706; }
@@ -497,23 +497,10 @@ const today = new Date().toISOString().slice(0, 10);
   align-self: flex-start;
   transition: background 0.15s;
 }
+.btn-download:hover { background: #15803d; }
 
-.btn-download:hover {
-  background: #15803d;
-}
-
-/* Missing details */
-.missing-details {
-  font-size: 13px;
-  color: #92400e;
-}
-
-.missing-details summary {
-  cursor: pointer;
-  font-weight: 600;
-  color: #b45309;
-  user-select: none;
-}
+.missing-details { font-size: 13px; color: #92400e; }
+.missing-details summary { cursor: pointer; font-weight: 600; color: #b45309; user-select: none; }
 
 .missing-list {
   margin-top: 8px;

@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import { dirname, join } from "path";
+import { Readable } from "stream";
 import { fileURLToPath } from "url";
 
 config();
@@ -86,6 +87,7 @@ app.get("/api/me", requireAuth, (req, res) => {
   res.json({ email: req.user.email, name: req.user.name, picture: req.user.picture });
 });
 
+// Start export job — returns job_id immediately
 app.post("/api/export", requireAuth, async (req, res) => {
   const { orderIds, afterDate } = req.body;
 
@@ -98,20 +100,62 @@ app.post("/api/export", requireAuth, async (req, res) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ order_ids: orderIds, after: afterDate }),
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    const data = await pdfRes.json();
+    if (!pdfRes.ok) return res.status(pdfRes.status).json(data);
+    res.json(data); // { job_id: "..." }
+  } catch (err) {
+    console.error("Export start error:", err);
+    res.status(500).json({ error: err.message || "Failed to start export" });
+  }
+});
+
+// Stream SSE progress from pdf-service to browser
+app.get("/api/export/progress/:jobId", requireAuth, async (req, res) => {
+  res.set({
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders();
+
+  try {
+    const upstream = await fetch(`${PDF_SERVICE}/progress/${req.params.jobId}`, {
       signal: AbortSignal.timeout(600_000),
     });
 
+    if (!upstream.ok) {
+      res.write(`data: ${JSON.stringify({ type: "error", message: "Job not found" })}\n\n`);
+      return res.end();
+    }
+
+    Readable.fromWeb(upstream.body).pipe(res);
+  } catch (err) {
+    res.write(`data: ${JSON.stringify({ type: "error", message: err.message })}\n\n`);
+    res.end();
+  }
+});
+
+// Download completed PDF
+app.get("/api/export/download/:jobId", requireAuth, async (req, res) => {
+  try {
+    const pdfRes = await fetch(`${PDF_SERVICE}/download/${req.params.jobId}`, {
+      signal: AbortSignal.timeout(60_000),
+    });
+
     if (!pdfRes.ok) {
-      const err = await pdfRes.json().catch(() => ({ error: "PDF service error" }));
+      const err = await pdfRes.json().catch(() => ({ error: "Download failed" }));
       return res.status(pdfRes.status).json(err);
     }
 
     const missing = pdfRes.headers.get("X-Missing-Orders") || "";
     const found = pdfRes.headers.get("X-Found-Count") || "0";
-    const total = pdfRes.headers.get("X-Total-Count") || String(orderIds.length);
+    const total = pdfRes.headers.get("X-Total-Count") || "0";
 
     const buffer = await pdfRes.arrayBuffer();
-
     res.set("Content-Type", "application/pdf");
     res.set("Content-Disposition", 'attachment; filename="orders-export.pdf"');
     res.set("X-Missing-Orders", missing);
@@ -120,9 +164,8 @@ app.post("/api/export", requireAuth, async (req, res) => {
     res.set("Access-Control-Expose-Headers", "X-Missing-Orders, X-Found-Count, X-Total-Count");
     res.send(Buffer.from(buffer));
   } catch (err) {
-    console.error("Export error:", err);
-    const msg = err.name === "TimeoutError" ? "Export timed out (too many orders?)" : (err.message || "Export failed");
-    res.status(500).json({ error: msg });
+    console.error("Download error:", err);
+    res.status(500).json({ error: err.message || "Download failed" });
   }
 });
 

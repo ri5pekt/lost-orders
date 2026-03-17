@@ -6,9 +6,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Ensure Playwright browsers are installed for the pip-installed version
+RUN playwright install chromium
+
 COPY app.py .
 
 EXPOSE 5000
 
-# 1 worker, 600s timeout — Playwright is blocking and not safe with multiple workers
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "--workers", "1", "--threads", "1", "app:app"]
+# gthread worker allows concurrent threads: one for render job, one for SSE stream, one for download
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "--workers", "1", "--worker-class", "gthread", "--threads", "4", "app:app"]
