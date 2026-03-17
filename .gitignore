@@ -1,0 +1,27 @@
+# Sensitive credentials — never commit these
+credentials.json
+token.pickle
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pickle
+
+# Script outputs (PDFs, HTML)
+scripts/out*/
+scripts/*.log
+
+# Node
+node_modules/
+web/client/node_modules/
+web/client/dist/
+
+# Docker
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
